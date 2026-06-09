@@ -1,0 +1,11 @@
+*.pyc
+.DS_Store
+tags/
+*_extdep/
+.venv/
+.vscode/
+__pycache__/
+Build/
+Conf/
+BaseTools/Source/C/bin/
+BaseTools/Source/C/libs/
