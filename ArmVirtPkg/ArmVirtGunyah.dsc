@@ -22,7 +22,7 @@
   BUILD_TARGETS                  = DEBUG|RELEASE|NOOPT
   SKUID_IDENTIFIER               = DEFAULT
   FLASH_DEFINITION               = ArmVirtPkg/ArmVirtGunyah.fdf
-  POSTBUILD                      = python3 -c "import pathlib, shutil; [shutil.copy2(p, p.with_name('edk2-aarch64-gunyah.fd')) for p in pathlib.Path('Build/ArmVirtGunyah-AArch64').glob('*/FV/EDK2-AARCH64-GUNYAH.fd')]"
+  POSTBUILD                      = mv Build/ArmVirtGunyah-AArch64/RELEASE_GCC5/FV/EDK2-AARCH64-GUNYAH.fd Build/ArmVirtGunyah-AArch64/RELEASE_GCC5/FV/edk2-aarch64-gunyah.fd && :
 
   #
   # Defines for default states.  These can be changed on the command line.
