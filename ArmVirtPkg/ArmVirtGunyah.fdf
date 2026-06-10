@@ -23,7 +23,7 @@
 [Defines]
   DEFINE FVMAIN_COMPACT_SIZE  = 0xcf000
 
-[FD.QEMU_EFI]
+[FD.edk2-aarch64-gunyah]
 BaseAddress   = 0x80000000|gArmTokenSpaceGuid.PcdFdBaseAddress  # Gunyah loads firmware at 0x80000000
 Size          = $(FD_SIZE)|gArmTokenSpaceGuid.PcdFdSize         # The size in bytes of the FLASH Device
 ErasePolarity = 1
