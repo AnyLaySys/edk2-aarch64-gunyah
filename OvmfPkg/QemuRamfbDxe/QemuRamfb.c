@@ -9,28 +9,21 @@
 **/
 
 #include <Protocol/GraphicsOutput.h>
-#include <Protocol/IoMmu.h>
 
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/IoLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DevicePathLib.h>
-#include <Library/FrameBufferBltLib.h>
+#include <Library/DxeServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/QemuFwCfgLib.h>
 
 #include <Guid/QemuRamfb.h>
 
-//
-// Gunyah: When EDKII_IOMMU_PROTOCOL is available, the framebuffer must be
-// allocated from SHARE'd memory so the host (QEMU) can read pixel data.
-// Regular AllocateReservedPages returns LEND'd memory which is host-
-// inaccessible after VM_START, resulting in a blank display.
-//
-STATIC EDKII_IOMMU_PROTOCOL  *mIoMmu;
-STATIC BOOLEAN                mFbFromIoMmu;
-
+#define RAMFB_MMIO_BASE  0x0F000000ULL
+#define RAMFB_MMIO_SIZE  0x01000000ULL
 #define RAMFB_FORMAT  0x34325258 /* DRM_FORMAT_XRGB8888 */
 #define RAMFB_BPP     4
 
@@ -47,8 +40,6 @@ typedef struct RAMFB_CONFIG {
 
 STATIC EFI_HANDLE              mRamfbHandle;
 STATIC EFI_HANDLE              mGopHandle;
-STATIC FRAME_BUFFER_CONFIGURE  *mQemuRamfbFrameBufferBltConfigure;
-STATIC UINTN                   mQemuRamfbFrameBufferBltConfigureSize;
 STATIC FIRMWARE_CONFIG_ITEM    mRamfbFwCfgItem;
 
 STATIC EFI_GRAPHICS_OUTPUT_MODE_INFORMATION  mQemuRamfbModeInfo[] = {
@@ -117,8 +108,6 @@ QemuRamfbGraphicsOutputSetMode (
 {
   EFI_GRAPHICS_OUTPUT_MODE_INFORMATION  *ModeInfo;
   RAMFB_CONFIG                          Config;
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL         Black;
-  RETURN_STATUS                         Status;
 
   if (ModeNumber >= mQemuRamfbMode.MaxMode) {
     return EFI_UNSUPPORTED;
@@ -141,70 +130,76 @@ QemuRamfbGraphicsOutputSetMode (
   Config.Height  = SwapBytes32 (ModeInfo->VerticalResolution);
   Config.Stride  = SwapBytes32 (ModeInfo->HorizontalResolution * RAMFB_BPP);
 
-  Status = FrameBufferBltConfigure (
-             (VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase,
-             ModeInfo,
-             mQemuRamfbFrameBufferBltConfigure,
-             &mQemuRamfbFrameBufferBltConfigureSize
-             );
-
-  if (Status == RETURN_BUFFER_TOO_SMALL) {
-    if (mQemuRamfbFrameBufferBltConfigure != NULL) {
-      FreePool (mQemuRamfbFrameBufferBltConfigure);
-    }
-
-    mQemuRamfbFrameBufferBltConfigure =
-      AllocatePool (mQemuRamfbFrameBufferBltConfigureSize);
-    if (mQemuRamfbFrameBufferBltConfigure == NULL) {
-      mQemuRamfbFrameBufferBltConfigureSize = 0;
-      return EFI_OUT_OF_RESOURCES;
-    }
-
-    Status = FrameBufferBltConfigure (
-               (VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase,
-               ModeInfo,
-               mQemuRamfbFrameBufferBltConfigure,
-               &mQemuRamfbFrameBufferBltConfigureSize
-               );
-  }
-
-  if (RETURN_ERROR (Status)) {
-    ASSERT (Status == RETURN_UNSUPPORTED);
-    return Status;
-  }
-
   mQemuRamfbMode.Mode = ModeNumber;
   mQemuRamfbMode.Info = ModeInfo;
 
   QemuFwCfgSelectItem (mRamfbFwCfgItem);
   QemuFwCfgWriteBytes (sizeof (Config), &Config);
 
-  //
-  // clear screen
-  //
-  ZeroMem (&Black, sizeof (Black));
-  Status = FrameBufferBlt (
-             mQemuRamfbFrameBufferBltConfigure,
-             &Black,
-             EfiBltVideoFill,
-             0,                               // SourceX -- ignored
-             0,                               // SourceY -- ignored
-             0,                               // DestinationX
-             0,                               // DestinationY
-             ModeInfo->HorizontalResolution,  // Width
-             ModeInfo->VerticalResolution,    // Height
-             0                                // Delta -- ignored
-             );
-  if (RETURN_ERROR (Status)) {
-    DEBUG ((
-      DEBUG_WARN,
-      "%a: clearing the screen failed: %r\n",
-      __func__,
-      Status
-      ));
+  return EFI_SUCCESS;
+}
+
+STATIC
+UINT32
+RamfbPixelFromBlt (
+  IN CONST EFI_GRAPHICS_OUTPUT_BLT_PIXEL  *Pixel
+  )
+{
+  return (UINT32)Pixel->Blue |
+         ((UINT32)Pixel->Green << 8) |
+         ((UINT32)Pixel->Red << 16);
+}
+
+STATIC
+VOID
+RamfbPixelToBlt (
+  OUT EFI_GRAPHICS_OUTPUT_BLT_PIXEL  *Pixel,
+  IN  UINT32                         Value
+  )
+{
+  Pixel->Blue     = (UINT8)Value;
+  Pixel->Green    = (UINT8)(Value >> 8);
+  Pixel->Red      = (UINT8)(Value >> 16);
+  Pixel->Reserved = 0;
+}
+
+STATIC
+UINTN
+RamfbPixelAddress (
+  IN UINTN  X,
+  IN UINTN  Y
+  )
+{
+  return (UINTN)mQemuRamfbMode.FrameBufferBase +
+         ((Y * mQemuRamfbMode.Info->PixelsPerScanLine + X) * RAMFB_BPP);
+}
+
+STATIC
+BOOLEAN
+RamfbRectFits (
+  IN UINTN  X,
+  IN UINTN  Y,
+  IN UINTN  Width,
+  IN UINTN  Height
+  )
+{
+  if ((Width == 0) || (Height == 0)) {
+    return FALSE;
   }
 
-  return EFI_SUCCESS;
+  if ((X > mQemuRamfbMode.Info->HorizontalResolution) ||
+      (Y > mQemuRamfbMode.Info->VerticalResolution))
+  {
+    return FALSE;
+  }
+
+  if ((Width > mQemuRamfbMode.Info->HorizontalResolution - X) ||
+      (Height > mQemuRamfbMode.Info->VerticalResolution - Y))
+  {
+    return FALSE;
+  }
+
+  return TRUE;
 }
 
 STATIC
@@ -223,18 +218,124 @@ QemuRamfbGraphicsOutputBlt (
   IN  UINTN                              Delta
   )
 {
-  return FrameBufferBlt (
-           mQemuRamfbFrameBufferBltConfigure,
-           BltBuffer,
-           BltOperation,
-           SourceX,
-           SourceY,
-           DestinationX,
-           DestinationY,
-           Width,
-           Height,
-           Delta
-           );
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL  *Pixel;
+  UINT8                          *Buffer;
+  UINTN                          X;
+  UINTN                          Y;
+  UINTN                          CopyX;
+  UINTN                          CopyY;
+  INTN                           StepX;
+  INTN                           StepY;
+  UINT32                         Value;
+
+  if ((This == NULL) || (mQemuRamfbMode.Info == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  switch (BltOperation) {
+    case EfiBltVideoFill:
+      if ((BltBuffer == NULL) ||
+          !RamfbRectFits (DestinationX, DestinationY, Width, Height))
+      {
+        return EFI_INVALID_PARAMETER;
+      }
+
+      Value = RamfbPixelFromBlt (BltBuffer);
+      for (Y = 0; Y < Height; Y++) {
+        for (X = 0; X < Width; X++) {
+          MmioWrite32 (
+            RamfbPixelAddress (DestinationX + X, DestinationY + Y),
+            Value
+            );
+        }
+      }
+
+      return EFI_SUCCESS;
+
+    case EfiBltBufferToVideo:
+      if ((BltBuffer == NULL) ||
+          !RamfbRectFits (DestinationX, DestinationY, Width, Height))
+      {
+        return EFI_INVALID_PARAMETER;
+      }
+
+      if (Delta == 0) {
+        Delta = Width * sizeof (*BltBuffer);
+      }
+
+      Buffer = (UINT8 *)BltBuffer;
+      for (Y = 0; Y < Height; Y++) {
+        Pixel = (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)
+                  (Buffer + (SourceY + Y) * Delta) + SourceX;
+        for (X = 0; X < Width; X++) {
+          MmioWrite32 (
+            RamfbPixelAddress (DestinationX + X, DestinationY + Y),
+            RamfbPixelFromBlt (&Pixel[X])
+            );
+        }
+      }
+
+      return EFI_SUCCESS;
+
+    case EfiBltVideoToBltBuffer:
+      if ((BltBuffer == NULL) ||
+          !RamfbRectFits (SourceX, SourceY, Width, Height))
+      {
+        return EFI_INVALID_PARAMETER;
+      }
+
+      if (Delta == 0) {
+        Delta = Width * sizeof (*BltBuffer);
+      }
+
+      Buffer = (UINT8 *)BltBuffer;
+      for (Y = 0; Y < Height; Y++) {
+        Pixel = (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)
+                  (Buffer + (DestinationY + Y) * Delta) + DestinationX;
+        for (X = 0; X < Width; X++) {
+          Value = MmioRead32 (RamfbPixelAddress (SourceX + X, SourceY + Y));
+          RamfbPixelToBlt (&Pixel[X], Value);
+        }
+      }
+
+      return EFI_SUCCESS;
+
+    case EfiBltVideoToVideo:
+      if (!RamfbRectFits (SourceX, SourceY, Width, Height) ||
+          !RamfbRectFits (DestinationX, DestinationY, Width, Height))
+      {
+        return EFI_INVALID_PARAMETER;
+      }
+
+      StepX = 1;
+      StepY = 1;
+      if (DestinationY > SourceY) {
+        StepY = -1;
+      }
+
+      if ((DestinationY == SourceY) && (DestinationX > SourceX)) {
+        StepX = -1;
+      }
+
+      for (Y = 0; Y < Height; Y++) {
+        CopyY = (StepY > 0) ? Y : (Height - 1 - Y);
+        for (X = 0; X < Width; X++) {
+          CopyX = (StepX > 0) ? X : (Width - 1 - X);
+          Value = MmioRead32 (
+                    RamfbPixelAddress (SourceX + CopyX, SourceY + CopyY)
+                    );
+          MmioWrite32 (
+            RamfbPixelAddress (DestinationX + CopyX, DestinationY + CopyY),
+            Value
+            );
+        }
+      }
+
+      return EFI_SUCCESS;
+
+    default:
+      return EFI_INVALID_PARAMETER;
+  }
 }
 
 STATIC EFI_GRAPHICS_OUTPUT_PROTOCOL  mQemuRamfbGraphicsOutput = {
@@ -307,56 +408,52 @@ InitializeQemuRamfb (
 
   Pages     = EFI_SIZE_TO_PAGES (MaxFbSize);
   MaxFbSize = EFI_PAGES_TO_SIZE (Pages);
+  FbBase    = RAMFB_MMIO_BASE;
 
-  //
-  // Gunyah: Try to allocate framebuffer from SHARE'd memory via IoMmu.
-  // The host needs to read pixel data, which is impossible from LEND'd memory.
-  //
-  FbBase = 0;
-  Status = gBS->LocateProtocol (&gEdkiiIoMmuProtocolGuid, NULL, (VOID **)&mIoMmu);
-  if (!EFI_ERROR (Status) && mIoMmu != NULL) {
-    VOID  *FbPtr = NULL;
-    Status = mIoMmu->AllocateBuffer (
-                        mIoMmu,
-                        AllocateAnyPages,
-                        EfiReservedMemoryType,
-                        Pages,
-                        &FbPtr,
-                        0
-                        );
-    if (!EFI_ERROR (Status) && FbPtr != NULL) {
-      FbBase       = (EFI_PHYSICAL_ADDRESS)(UINTN)FbPtr;
-      mFbFromIoMmu = TRUE;
-      DEBUG ((
-        DEBUG_INFO,
-        "Ramfb: Framebuffer allocated from IoMmu SHARE'd pool at 0x%lx\n",
-        (UINT64)FbBase
-        ));
-    } else {
-      DEBUG ((
-        DEBUG_WARN,
-        "Ramfb: IoMmu AllocateBuffer failed (%r), falling back\n",
-        Status
-        ));
-    }
+  Status = gDS->AddMemorySpace (
+                  EfiGcdMemoryTypeMemoryMappedIo,
+                  RAMFB_MMIO_BASE,
+                  RAMFB_MMIO_SIZE,
+                  EFI_MEMORY_UC | EFI_MEMORY_XP
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Ramfb: AddMemorySpace failed: %r\n", Status));
+    return Status;
   }
 
-  if (FbBase == 0) {
-    FbBase = (EFI_PHYSICAL_ADDRESS)(UINTN)AllocateReservedPages (Pages);
+  Status = gDS->AllocateMemorySpace (
+                  EfiGcdAllocateAddress,
+                  EfiGcdMemoryTypeMemoryMappedIo,
+                  0,
+                  MaxFbSize,
+                  &FbBase,
+                  ImageHandle,
+                  NULL
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Ramfb: AllocateMemorySpace failed: %r\n", Status));
+    gDS->RemoveMemorySpace (RAMFB_MMIO_BASE, RAMFB_MMIO_SIZE);
+    return Status;
   }
 
-  if (FbBase == 0) {
-    DEBUG ((DEBUG_ERROR, "Ramfb: memory allocation failed\n"));
-    return EFI_OUT_OF_RESOURCES;
+  Status = gDS->SetMemorySpaceAttributes (
+                  RAMFB_MMIO_BASE,
+                  RAMFB_MMIO_SIZE,
+                  EFI_MEMORY_UC | EFI_MEMORY_XP
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Ramfb: SetMemorySpaceAttributes failed: %r\n", Status));
+    gDS->FreeMemorySpace (FbBase, MaxFbSize);
+    gDS->RemoveMemorySpace (RAMFB_MMIO_BASE, RAMFB_MMIO_SIZE);
+    return Status;
   }
 
   DEBUG ((
     DEBUG_INFO,
-    "Ramfb: Framebuffer at 0x%lx, %lu kB, %lu pages (shared=%d)\n",
+    "Ramfb: Framebuffer at 0x%lx, %lu kB, %lu pages\n",
     (UINT64)FbBase,
     (UINT64)(MaxFbSize / 1024),
-    (UINT64)Pages,
-    mFbFromIoMmu
+    (UINT64)Pages
     ));
   mQemuRamfbMode.FrameBufferSize = MaxFbSize;
   mQemuRamfbMode.FrameBufferBase = FbBase;
@@ -483,11 +580,8 @@ FreeRamfbHandle:
 FreeRamfbDevicePath:
   FreePool (RamfbDevicePath);
 FreeFramebuffer:
-  if (mFbFromIoMmu && mIoMmu != NULL) {
-    mIoMmu->FreeBuffer (mIoMmu, Pages, (VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase);
-  } else {
-    FreePages ((VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase, Pages);
-  }
+  gDS->FreeMemorySpace (mQemuRamfbMode.FrameBufferBase, MaxFbSize);
+  gDS->RemoveMemorySpace (RAMFB_MMIO_BASE, RAMFB_MMIO_SIZE);
 
   return Status;
 }

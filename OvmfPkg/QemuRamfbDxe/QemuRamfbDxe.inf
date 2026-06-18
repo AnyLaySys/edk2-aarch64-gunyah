@@ -30,7 +30,8 @@
   BaseMemoryLib
   DebugLib
   DevicePathLib
-  FrameBufferBltLib
+  DxeServicesTableLib
+  IoLib
   MemoryAllocationLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
@@ -38,7 +39,6 @@
 
 [Protocols]
   gEfiGraphicsOutputProtocolGuid                ## PRODUCES
-  gEdkiiIoMmuProtocolGuid                       ## SOMETIMES_CONSUMES
 
 [Guids]
   gQemuRamfbGuid
