@@ -1,11 +1,6 @@
-.DS_Store
 *.pyc
+/Conf/
 BaseTools/Source/C/bin/
 BaseTools/Source/C/libs/
 Build/
-Conf/
-*_extdep/
 __pycache__/
-tags/
-.venv/
-.vscode/
