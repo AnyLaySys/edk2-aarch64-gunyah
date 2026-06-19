@@ -11,8 +11,7 @@ jobs:
     steps:
     - name: 部署
       run: |
-        sudo apt update
-        sudo apt install --no-install-recommends -y acpica-tools gcc-aarch64-linux-gnu uuid-dev
+        sudo apt install -y acpica-tools gcc-aarch64-linux-gnu uuid-dev
     - name: 拉取
       uses: actions/checkout@v6
       with:
