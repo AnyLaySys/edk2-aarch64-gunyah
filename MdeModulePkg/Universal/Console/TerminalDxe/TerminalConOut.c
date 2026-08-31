@@ -78,7 +78,6 @@ UNICODE_TO_CHAR  UnicodeToPcAnsiOrAscii[] = {
 CHAR16  mSetModeString[]           = { ESC, '[', '=', '3', 'h', 0 };
 CHAR16  mSetModeStringResize[]     = { ESC, '[', '8', ';', '0', '0', '0', ';', '0', '0', '0', 't', 0 };
 CHAR16  mSetAttributeString[]      = { ESC, '[', '0', 'm', ESC, '[', '4', '0', 'm', ESC, '[', '4', '0', 'm', 0 };
-CHAR16  mClearScreenString[]       = { ESC, '[', '2', 'J', 0 };
 CHAR16  mSetCursorPositionString[] = { ESC, '[', '0', '0', '0', ';', '0', '0', '0', 'H', 0 };
 CHAR16  mCursorForwardString[]     = { ESC, '[', '0', '0', '0', 'C', 0 };
 CHAR16  mCursorBackwardString[]    = { ESC, '[', '0', '0', '0', 'D', 0 };
@@ -714,43 +713,13 @@ TerminalConOutSetAttribute (
   return EFI_SUCCESS;
 }
 
-/**
-  Implements EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.ClearScreen().
-  It clears the ANSI terminal's display to the
-  currently selected background color.
-
-  @param This     Indicates the calling context.
-
-  @retval EFI_SUCCESS       The operation completed successfully.
-  @retval EFI_DEVICE_ERROR  The terminal screen cannot be cleared due to serial port error.
-  @retval EFI_UNSUPPORTED   The terminal is not in a valid display mode.
-
-**/
 EFI_STATUS
 EFIAPI
 TerminalConOutClearScreen (
   IN  EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL  *This
   )
 {
-  EFI_STATUS    Status;
-  TERMINAL_DEV  *TerminalDevice;
-
-  TerminalDevice = TERMINAL_CON_OUT_DEV_FROM_THIS (This);
-
-  //
-  //  control sequence for clear screen request
-  //
-  TerminalDevice->OutputEscChar = TRUE;
-  Status                        = This->OutputString (This, mClearScreenString);
-  TerminalDevice->OutputEscChar = FALSE;
-
-  if (EFI_ERROR (Status)) {
-    return EFI_DEVICE_ERROR;
-  }
-
-  Status = This->SetCursorPosition (This, 0, 0);
-
-  return Status;
+  return EFI_SUCCESS;
 }
 
 /**
